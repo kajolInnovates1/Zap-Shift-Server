@@ -6,6 +6,8 @@ const dotenv = require("dotenv");
 
 dotenv.config();
 
+const stripe = require("stripe")(process.env.SECRET_KEY);
+
 const app = express();
 const port = process.env.PORT || 5000;
 
@@ -35,13 +37,14 @@ async function run() {
         await client.connect();
         const db = client.db("parcelDB");
         const parcelsCollection = db.collection("parcels");
+        const transactionCollection = db.collection("transaction");
 
         app.get("/parcels", async (req, res) => {
             const parcels = await parcelsCollection.find().toArray();
             res.send(parcels);
         });
 
-        //parcel data geting
+        //get All data OR Using any Specific email
 
         app.get("/parcels", async (req, res) => {
             try {
@@ -60,8 +63,26 @@ async function run() {
             }
         });
 
+        // Get Data to usign ID
+
+        app.get("/parcels/:id", async (req, res) => {
+            try {
+                const id = req.params.id;
+                const parcel = await parcelsCollection.findOne({ _id: new ObjectId(id) });
+
+                if (!parcel) {
+                    return res.status(404).send({ message: "Parcel not found" });
+                }
+
+                res.send(parcel);
+            } catch (error) {
+                console.error("Failed to get parcel by id:", error);
+                res.status(500).send({ message: "Internal server error" });
+            }
+        });
 
 
+        //    insert Data to any form
         app.post("/parcels", async (req, res) => {
             const parcel = req.body;
             const result = await parcelsCollection.insertOne(parcel);
@@ -82,6 +103,83 @@ async function run() {
             } catch (error) {
                 console.error("Failed to delete parcel:", error);
                 res.status(500).send({ message: "Internal server error" });
+            }
+        });
+
+
+        //get the api on transaction history
+
+        app.get("/transactions", async (req, res) => {
+            try {
+                const email = req.query.email;
+                const query = email ? { email } : {}; // if email query exists, filter by email
+
+                const transactions = await transactionCollection
+                    .find(query)
+                    .sort({ date: -1 }) // latest first
+                    .toArray();
+
+                res.status(200).send(transactions);
+            } catch (error) {
+                console.error("Failed to get transactions:", error);
+                res.status(500).send({ message: "Internal server error" });
+            }
+        });
+
+
+
+        // after Confirm to payment store transaction  update payment status
+
+        app.post("/transactions", async (req, res) => {
+            try {
+                const transactionData = req.body; // contains parcelId and payment info
+                const { parcelId, email, amount, paymentMethod, transactionId } = transactionData;
+
+                const transaction = {
+                    parcelId: new ObjectId(parcelId),
+                    email,
+                    amount,
+                    paymentMethod,
+                    transactionId,
+                    status: "success",
+                    date: new Date()
+                };
+
+                const transactionResult = await transactionCollection.insertOne(transaction);
+                // Update payment status in parcel
+                const updateResult = await parcelsCollection.updateOne(
+                    { _id: new ObjectId(parcelId) },
+                    { $set: { payment_status: "paid" } }
+                );
+
+                if (transactionResult.insertedId && updateResult.modifiedCount === 1) {
+                    res.status(200).send({
+                        message: "Transaction stored and parcel payment status updated",
+                        transactionId: transactionResult.insertedId
+                    });
+                } else {
+                    res.status(400).send({ message: "Transaction or parcel update failed" });
+                }
+            } catch (error) {
+                console.error("Transaction error:", error);
+                res.status(500).send({ message: "Internal Server Error" });
+            }
+        });
+
+
+
+        // confirm payment checkout
+
+        app.post('/create-payment-intent', async (req, res) => {
+            const amountIncents = req.body.amountParcel;
+            try {
+                const paymentIntent = await stripe.paymentIntents.create({
+                    amount: amountIncents,
+                    currency: 'usd',
+                });
+                res.status(200).json({ clientSecret: paymentIntent.client_secret });
+            } catch (error) {
+                res.status(500).json({ error: error.message });
             }
         });
 
